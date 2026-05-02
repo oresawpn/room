@@ -1,0 +1,1158 @@
+<script type="module">
+  // Import the functions you need from the SDKs you need
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-app.js";
+  import { getAnalytics } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-analytics.js";
+  // TODO: Add SDKs for Firebase products that you want to use
+  // https://firebase.google.com/docs/web/setup#available-libraries
+
+  // Your web app's Firebase configuration
+  // For Firebase JS SDK v7.20.0 and later, measurementId is optional
+  const firebaseConfig = {
+    apiKey: "AIzaSyAmpoceyIUxel7RN_AVQC0Xv63oBwZemKY",
+    authDomain: "home-27c05.firebaseapp.com",
+    databaseURL: "https://home-27c05-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "home-27c05",
+    storageBucket: "home-27c05.firebasestorage.app",
+    messagingSenderId: "1071068759534",
+    appId: "1:1071068759534:web:e77c439cd430d18974faff",
+    measurementId: "G-10K7289PN3"
+  };
+
+  // Initialize Firebase
+  const app = initializeApp(firebaseConfig);
+  const analytics = getAnalytics(app);
+</script>
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ระบบคิดค่าห้องพัก</title>
+<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import {
+    getDatabase, ref, set, get, update, remove,
+    onValue, off, push, serverTimestamp
+  } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  // ============================================================
+  // 🔥 ใส่ Firebase Config ของคุณตรงนี้
+  // ไปที่ https://console.firebase.google.com → สร้าง Project
+  // → Realtime Database → เพิ่มแอป Web → copy config มาวาง
+  // ============================================================
+  const FIREBASE_CONFIG = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT.firebaseapp.com",
+    databaseURL: "https://YOUR_PROJECT-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "YOUR_PROJECT",
+    storageBucket: "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId: "YOUR_APP_ID"
+  };
+
+  // ตรวจสอบว่ายังไม่ได้ตั้งค่า
+  const isConfigured = FIREBASE_CONFIG.apiKey !== "YOUR_API_KEY";
+
+  let app, db;
+  if (isConfigured) {
+    app = initializeApp(FIREBASE_CONFIG);
+    db = getDatabase(app);
+  }
+
+  // ============================================================
+  // REALTIME LISTENERS — ฟังการเปลี่ยนแปลงจาก Firebase
+  // ============================================================
+  let unsubscribeRooms = null;
+  let unsubscribeBills = null;
+  let unsubscribeSettings = null;
+
+  function startListeners() {
+    if (!db) return;
+
+    // Listen: rooms
+    const roomsRef = ref(db, 'rooms');
+    unsubscribeRooms = onValue(roomsRef, snap => {
+      const data = snap.val() || {};
+      // แปลง object เป็น array เรียงตาม order
+      window._state.rooms = Object.values(data).sort((a, b) => (a.order || 0) - (b.order || 0));
+      if (window._currentPage === 'dashboard') renderDashboard();
+      if (window._currentPage === 'meter') renderMeterPage();
+      if (window._currentPage === 'rooms') renderRooms();
+      updateOnlineIndicator(true);
+    });
+
+    // Listen: bills
+    const billsRef = ref(db, 'bills');
+    unsubscribeBills = onValue(billsRef, snap => {
+      window._state.bills = snap.val() || {};
+      if (window._currentPage === 'dashboard') renderDashboard();
+      if (window._currentPage === 'meter') renderMeterPage();
+    });
+
+    // Listen: settings
+    const settingsRef = ref(db, 'settings');
+    unsubscribeSettings = onValue(settingsRef, snap => {
+      const s = snap.val();
+      if (s) {
+        window._state.elecRate = s.elecRate || 7;
+        window._state.waterRate = s.waterRate || 18;
+        window._state.currentMonth = s.currentMonth || 'พ.ค. 68';
+      }
+      if (window._currentPage === 'settings') loadSettings();
+      if (window._currentPage === 'meter') {
+        document.getElementById('water-rate-label').textContent = window._state.waterRate;
+        document.getElementById('elec-rate-label').textContent = window._state.elecRate;
+      }
+    });
+  }
+
+  // ============================================================
+  // DB WRITE HELPERS
+  // ============================================================
+  async function dbSetRoom(room) {
+    if (!db) { localFallback('rooms', room.id, room); return; }
+    await set(ref(db, `rooms/${room.id}`), room);
+  }
+
+  async function dbRemoveRoom(id) {
+    if (!db) { localFallbackRemove('rooms', id); return; }
+    await remove(ref(db, `rooms/${id}`));
+    await remove(ref(db, `bills/${id}`));
+  }
+
+  async function dbSetBill(roomId, bill) {
+    if (!db) { localFallback('bills', roomId, bill); return; }
+    await set(ref(db, `bills/${roomId}`), bill);
+  }
+
+  async function dbUpdateBill(roomId, patch) {
+    if (!db) return;
+    await update(ref(db, `bills/${roomId}`), patch);
+  }
+
+  async function dbSaveSettings(settings) {
+    if (!db) return;
+    await update(ref(db, 'settings'), settings);
+  }
+
+  async function dbReorderRooms(rooms) {
+    if (!db) return;
+    const updates = {};
+    rooms.forEach((r, i) => { updates[`rooms/${r.id}/order`] = i; });
+    await update(ref(db), updates);
+  }
+
+  // ============================================================
+  // LOCAL FALLBACK (ถ้าไม่มี Firebase config)
+  // ============================================================
+  function localFallback(collection, id, data) {
+    window._state[collection][id] = data;
+    localStorage.setItem('meterapp_local', JSON.stringify(window._state));
+    if (window._currentPage === 'dashboard') renderDashboard();
+    if (window._currentPage === 'meter') renderMeterPage();
+    if (window._currentPage === 'rooms') renderRooms();
+  }
+  function localFallbackRemove(collection, id) {
+    delete window._state[collection][id];
+    localStorage.setItem('meterapp_local', JSON.stringify(window._state));
+    renderRooms(); renderDashboard();
+  }
+
+  // ============================================================
+  // SEED DEMO DATA ครั้งแรก
+  // ============================================================
+  async function seedDemoDataIfEmpty() {
+    if (!db) return;
+    const snap = await get(ref(db, 'rooms'));
+    if (snap.exists()) return; // มีข้อมูลแล้ว ไม่ต้อง seed
+
+    const demoRooms = [
+      { id: '101', tenant: 'สมชาย ใจดี',      rent: 3000, lastElec: 1024, lastWater: 210, history: [], order: 0 },
+      { id: '102', tenant: 'สมหญิง รักเรียน', rent: 2800, lastElec: 860,  lastWater: 185, history: [], order: 1 },
+      { id: '103', tenant: 'วิชัย มีสุข',     rent: 3000, lastElec: 2210, lastWater: 310, history: [], order: 2 },
+      { id: '104', tenant: 'นภา สดใส',        rent: 2500, lastElec: 500,  lastWater: 90,  history: [], order: 3 },
+      { id: '105', tenant: 'ประสิทธิ์ ขยัน',  rent: 3000, lastElec: 1730, lastWater: 240, history: [], order: 4 },
+    ];
+    const updates = {};
+    demoRooms.forEach(r => { updates[`rooms/${r.id}`] = r; });
+    updates['settings'] = { elecRate: 7, waterRate: 18, currentMonth: 'พ.ค. 68' };
+    await update(ref(db), updates);
+  }
+
+  // ============================================================
+  // EXPOSE TO GLOBAL (ให้ HTML ส่วนอื่นเรียกได้)
+  // ============================================================
+  window._db = {
+    isConfigured,
+    setRoom: dbSetRoom,
+    removeRoom: dbRemoveRoom,
+    setBill: dbSetBill,
+    updateBill: dbUpdateBill,
+    saveSettings: dbSaveSettings,
+    reorderRooms: dbReorderRooms,
+    startListeners,
+    seedDemoDataIfEmpty
+  };
+
+  // Init
+  document.addEventListener('DOMContentLoaded', () => {
+    if (isConfigured) {
+      seedDemoDataIfEmpty().then(() => startListeners());
+      updateOnlineIndicator(true);
+    } else {
+      updateOnlineIndicator(false);
+      // โหลด local data
+      const local = localStorage.getItem('meterapp_local');
+      if (local) {
+        const d = JSON.parse(local);
+        window._state = { ...window._state, ...d };
+        if (d.rooms) window._state.rooms = Array.isArray(d.rooms) ? d.rooms : Object.values(d.rooms);
+      }
+      renderDashboard();
+    }
+  });
+</script>
+
+<style>
+  :root {
+    --bg: #f5f4f0;
+    --surface: #ffffff;
+    --border: #e2e0d8;
+    --text: #1a1917;
+    --muted: #7a7870;
+    --accent: #1a3a2a;
+    --accent-light: #e8f0eb;
+    --warn: #8a3a00;
+    --warn-bg: #fef3e8;
+    --success: #1a5c2a;
+    --success-bg: #e8f5ec;
+    --water: #1a3a6a;
+    --water-bg: #e8f0fe;
+    --mono: 'IBM Plex Mono', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Sarabun', sans-serif; background: var(--bg); color: var(--text); font-size: 15px; line-height: 1.6; }
+
+  header {
+    background: var(--accent);
+    color: #fff;
+    padding: 0 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 56px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.15);
+  }
+  .logo { font-size: 15px; font-weight: 500; letter-spacing: 0.02em; display: flex; align-items: center; gap: 10px; }
+  .logo span { font-family: var(--mono); font-size: 11px; opacity: 0.6; }
+
+  /* Online indicator */
+  .online-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    background: rgba(255,255,255,0.12);
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-family: var(--mono);
+  }
+  .online-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: #7ec8a0;
+    box-shadow: 0 0 6px #7ec8a0;
+    flex-shrink: 0;
+  }
+  .online-dot.offline { background: #f09060; box-shadow: 0 0 6px #f09060; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .online-dot.syncing { animation: blink 1s infinite; }
+
+  nav { display: flex; }
+  nav a {
+    color: rgba(255,255,255,0.7);
+    text-decoration: none;
+    font-size: 13px;
+    padding: 0 14px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+    border-bottom: 2px solid transparent;
+  }
+  nav a.active { color: #fff; border-bottom-color: #7ec8a0; }
+  nav a:hover { color: #fff; background: rgba(255,255,255,0.05); }
+
+  /* Firebase setup banner */
+  .setup-banner {
+    background: #fff8e8;
+    border: 1px solid #f5c842;
+    border-radius: 0;
+    padding: 12px 2rem;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    line-height: 1.5;
+  }
+  .setup-banner strong { color: #7a5200; }
+  .setup-banner a { color: var(--accent); }
+
+  .page { display: none; max-width: 1040px; margin: 0 auto; padding: 2rem 1.5rem; }
+  .page.active { display: block; }
+
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 2rem; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+  .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; }
+  .stat-val { font-size: 26px; font-weight: 600; font-family: var(--mono); }
+  .stat-sub { font-size: 11px; color: var(--muted); margin-top: 3px; }
+  .stat-warn .stat-val { color: var(--warn); }
+  .stat-ok .stat-val { color: var(--success); }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 1.5rem; overflow: hidden; }
+  .card-head { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; background: #fafaf8; }
+  .card-title { font-size: 13px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+  .card-body { padding: 20px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { font-size: 11px; color: var(--muted); text-align: left; padding: 8px 16px; background: #fafaf8; border-bottom: 1px solid var(--border); font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; }
+  td { padding: 12px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #fafaf8; }
+
+  .badge { display: inline-block; font-size: 11px; padding: 3px 10px; border-radius: 20px; font-weight: 500; }
+  .badge-ok { background: var(--success-bg); color: var(--success); }
+  .badge-warn { background: var(--warn-bg); color: var(--warn); }
+  .badge-gray { background: var(--bg); color: var(--muted); }
+
+  /* Realtime flash animation */
+  @keyframes rt-flash {
+    0% { background: #fffbe6; }
+    100% { background: transparent; }
+  }
+  .rt-updated { animation: rt-flash 1.5s ease-out; }
+
+  .meter-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+  .form-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+  .form-group { display: flex; flex-direction: column; gap: 5px; }
+  label { font-size: 12px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  input[type=number], input[type=text], select {
+    height: 40px; border: 1px solid var(--border); border-radius: 8px;
+    padding: 0 12px; font-family: 'Sarabun', sans-serif; font-size: 14px;
+    color: var(--text); background: var(--surface); transition: border-color 0.15s; width: 100%;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  input[readonly] { background: var(--bg); color: var(--muted); }
+
+  .section-label {
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--muted); margin: 16px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .room-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+  .room-btn {
+    padding: 5px 14px; border-radius: 20px; border: 1px solid var(--border);
+    background: var(--surface); font-size: 13px; font-family: var(--mono);
+    cursor: pointer; transition: all 0.15s;
+  }
+  .room-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .room-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  /* Bill preview */
+  .bill-preview { background: #fff; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .bill-header { background: var(--accent); color: #fff; padding: 14px 18px; display: flex; justify-content: space-between; align-items: baseline; }
+  .bill-header-title { font-size: 13px; font-weight: 600; opacity: 0.9; }
+  .bill-header-room { font-family: var(--mono); font-size: 20px; font-weight: 600; }
+  .bill-header-tenant { font-size: 12px; opacity: 0.7; margin-top: 2px; }
+  .bill-header-month { font-size: 12px; opacity: 0.6; font-family: var(--mono); }
+  .bill-section { padding: 12px 18px; border-bottom: 1px solid var(--border); }
+  .bill-section-title { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 8px; display: flex; align-items: center; gap: 5px; }
+  .bill-line { display: flex; justify-content: space-between; align-items: center; font-size: 13px; padding: 3px 0; }
+  .bill-line .lbl { color: var(--muted); }
+  .bill-line .amt { font-family: var(--mono); font-weight: 500; }
+  .bill-line .amt.highlight { color: var(--accent); }
+  .bill-line.sub-row { padding-left: 12px; font-size: 12px; color: var(--muted); }
+  .bill-line.sub-row .amt { color: var(--text); font-size: 12px; }
+  .bill-total-section { padding: 14px 18px; background: var(--bg); }
+  .bill-total-row { display: flex; justify-content: space-between; font-size: 13px; padding: 2px 0; color: var(--muted); }
+  .bill-grand-total { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; padding-top: 10px; border-top: 2px solid var(--accent); }
+  .bill-grand-label { font-size: 14px; font-weight: 600; }
+  .bill-grand-amount { font-size: 32px; font-family: var(--mono); font-weight: 700; color: var(--accent); }
+
+  .btn { height: 40px; padding: 0 20px; border-radius: 8px; border: 1px solid var(--border); font-family: 'Sarabun', sans-serif; font-size: 14px; cursor: pointer; background: var(--surface); color: var(--text); transition: all 0.15s; }
+  .btn:hover { background: var(--bg); }
+  .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn-primary:hover { background: #0f2a1a; }
+  .btn-sm { height: 32px; padding: 0 14px; font-size: 12px; }
+  .btn-danger { background: #fee; color: #8a0000; border-color: #fcc; }
+  .actions { display: flex; gap: 8px; margin-top: 16px; }
+
+  .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+  .divider { height: 1px; background: var(--border); margin: 12px 0; }
+
+  /* Spinner for saving */
+  .saving-indicator {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted);
+    font-family: var(--mono);
+  }
+  .saving-indicator.show { display: flex; }
+  .mini-spin { width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Rooms */
+  #rooms-sortable { display: flex; flex-direction: column; }
+  .room-row { display: flex; align-items: center; border-bottom: 1px solid var(--border); background: var(--surface); cursor: default; transition: background 0.15s; }
+  .room-row:last-child { border-bottom: none; }
+  .room-row.dragging { opacity: 0.45; background: var(--accent-light); }
+  .room-row.drag-over { border-top: 2px solid var(--accent); background: var(--accent-light); }
+  .drag-handle { padding: 12px 10px 12px 16px; color: var(--muted); cursor: grab; font-size: 16px; user-select: none; flex-shrink: 0; }
+  .drag-handle:active { cursor: grabbing; }
+  .room-row td { border-bottom: none; }
+
+  /* Modal */
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 200; align-items: center; justify-content: center; }
+  .modal-overlay.open { display: flex; }
+  .modal { background: var(--surface); border-radius: 16px; width: 480px; max-width: 95vw; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.2); }
+  .modal-head { background: var(--accent); color: #fff; padding: 16px 20px; display: flex; justify-content: space-between; align-items: center; }
+  .modal-head h3 { font-size: 15px; font-weight: 500; }
+  .modal-close { background: none; border: none; color: rgba(255,255,255,0.7); font-size: 20px; cursor: pointer; }
+  .modal-close:hover { color: #fff; }
+  .modal-body { padding: 20px; }
+  .modal-actions { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
+
+  .edit-btn-dash { background: none; border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; font-size: 11px; font-family: 'Sarabun', sans-serif; cursor: pointer; color: var(--muted); transition: all 0.15s; margin-left: 6px; }
+  .edit-btn-dash:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  #toast { position: fixed; bottom: 2rem; left: 50%; transform: translateX(-50%) translateY(80px); background: var(--accent); color: #fff; padding: 12px 24px; border-radius: 8px; font-size: 14px; transition: transform 0.3s; z-index: 999; white-space: nowrap; }
+  #toast.show { transform: translateX(-50%) translateY(0); }
+
+  .mono { font-family: var(--mono); font-size: 13px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+  .dot-green { background: #1a5c2a; }
+  .dot-blue { background: #1a3a6a; }
+  .dot-orange { background: #8a3a00; }
+
+  @media (max-width: 660px) {
+    .stats { grid-template-columns: 1fr 1fr; }
+    .meter-layout { grid-template-columns: 1fr; }
+    .form-row { grid-template-columns: 1fr; }
+    .form-row-3 { grid-template-columns: 1fr; }
+    .settings-grid { grid-template-columns: 1fr; }
+    nav a { padding: 0 10px; font-size: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    🏠 ระบบคิดค่าห้องพัก
+    <span>v2.1</span>
+  </div>
+  <nav>
+    <a class="active" onclick="showPage('dashboard', this)">แดชบอร์ด</a>
+    <a onclick="showPage('meter', this)">บันทึกบิล</a>
+    <a onclick="showPage('rooms', this)">ห้องพัก</a>
+    <a onclick="showPage('settings', this)">ตั้งค่า</a>
+  </nav>
+  <div class="online-badge" id="online-badge">
+    <div class="online-dot offline" id="online-dot"></div>
+    <span id="online-text">Local mode</span>
+  </div>
+</header>
+
+<!-- Setup Banner (แสดงถ้ายังไม่ได้ตั้งค่า Firebase) -->
+<div class="setup-banner" id="setup-banner" style="display:none">
+  ⚠️ <strong>ยังไม่ได้เชื่อม Firebase:</strong>
+  ขณะนี้ใช้งาน local mode (ข้อมูลไม่ sync ข้ามเครื่อง)
+  → เปิดไฟล์ HTML แก้ไข <code style="background:#fef3e8;padding:1px 5px;border-radius:3px">FIREBASE_CONFIG</code>
+  ด้วย config จาก <a href="https://console.firebase.google.com" target="_blank">Firebase Console</a>
+  แล้ว host ขึ้น server เพื่อใช้งาน real-time ได้เลย
+</div>
+
+<!-- ===== DASHBOARD ===== -->
+<div id="page-dashboard" class="page active">
+  <div class="stats">
+    <div class="stat"><div class="stat-label">ห้องทั้งหมด</div><div class="stat-val" id="s-total">—</div><div class="stat-sub" id="s-occupied">—</div></div>
+    <div class="stat stat-warn"><div class="stat-label">ค้างชำระ</div><div class="stat-val" id="s-pending">—</div><div class="stat-sub">ห้อง</div></div>
+    <div class="stat stat-ok"><div class="stat-label">บันทึกบิลแล้ว</div><div class="stat-val" id="s-read">—</div><div class="stat-sub" id="s-readof">จาก — ห้อง</div></div>
+    <div class="stat"><div class="stat-label">รวมรับเดือนนี้</div><div class="stat-val" id="s-revenue">—</div><div class="stat-sub">บาท</div></div>
+  </div>
+  <div class="card">
+    <div class="card-head">
+      <span class="card-title">รายการบิลเดือนนี้</span>
+      <div style="display:flex;align-items:center;gap:12px">
+        <div class="saving-indicator" id="saving-dash"><div class="mini-spin"></div><span>กำลังบันทึก...</span></div>
+        <span id="dash-month" style="font-size:12px;color:var(--muted)"></span>
+      </div>
+    </div>
+    <table>
+      <thead><tr>
+        <th>ห้อง</th><th>ผู้เช่า</th><th>ค่าเช่า</th>
+        <th>ค่าน้ำ</th><th>ค่าไฟ</th><th>รวม (฿)</th>
+        <th>สถานะ</th><th></th>
+      </tr></thead>
+      <tbody id="dash-table"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ===== METER / BILL INPUT ===== -->
+<div id="page-meter" class="page">
+  <div class="meter-layout">
+    <div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">เลือกห้อง</span></div>
+        <div class="card-body">
+          <div class="room-grid" id="room-selector"></div>
+          <div class="section-label"><span class="dot dot-orange"></span> ค่าเช่าห้อง</div>
+          <div class="form-row" style="margin-bottom:0">
+            <div class="form-group">
+              <label>ค่าเช่า (฿/เดือน)</label>
+              <input type="number" id="rent-val" placeholder="3000" oninput="recalc()">
+            </div>
+          </div>
+          <div class="section-label" style="margin-top:16px"><span class="dot dot-blue"></span> ค่าน้ำ</div>
+          <div class="form-row-3">
+            <div class="form-group"><label>มิเตอร์น้ำเดิม</label><input type="number" id="water-prev" readonly></div>
+            <div class="form-group"><label>มิเตอร์น้ำใหม่</label><input type="number" id="water-curr" placeholder="กรอก" oninput="recalc()"></div>
+            <div class="form-group"><label>หน่วย × <span id="water-rate-label">18</span>฿</label><input type="number" id="water-units-display" readonly placeholder="—"></div>
+          </div>
+          <div class="section-label"><span class="dot dot-green"></span> ค่าไฟ</div>
+          <div class="form-row-3">
+            <div class="form-group"><label>มิเตอร์ไฟเดิม</label><input type="number" id="prev-val" readonly></div>
+            <div class="form-group"><label>มิเตอร์ไฟใหม่</label><input type="number" id="curr-val" placeholder="กรอกตัวเลข" oninput="recalc()"></div>
+            <div class="form-group"><label>หน่วย × <span id="elec-rate-label">7</span>฿</label><input type="number" id="elec-units-display" readonly placeholder="—"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="bill-preview">
+        <div class="bill-header">
+          <div>
+            <div class="bill-header-title">ใบแจ้งค่าใช้จ่าย</div>
+            <div class="bill-header-room" id="r-room-num">—</div>
+            <div class="bill-header-tenant" id="r-tenant-name">เลือกห้องทางซ้าย</div>
+          </div>
+          <div style="text-align:right"><div class="bill-header-month" id="r-month">—</div></div>
+        </div>
+        <div class="bill-section">
+          <div class="bill-section-title"><span class="dot dot-orange"></span> ค่าเช่าห้อง</div>
+          <div class="bill-line"><span class="lbl">ค่าเช่าประจำเดือน</span><span class="amt" id="r-rent">—</span></div>
+        </div>
+        <div class="bill-section">
+          <div class="bill-section-title"><span class="dot dot-blue"></span> ค่าน้ำ</div>
+          <div class="bill-line sub-row"><span class="lbl">มิเตอร์เดิม</span><span class="amt" id="r-water-prev">—</span></div>
+          <div class="bill-line sub-row"><span class="lbl">มิเตอร์ใหม่</span><span class="amt" id="r-water-curr">—</span></div>
+          <div class="bill-line sub-row"><span class="lbl">จำนวนหน่วย</span><span class="amt" id="r-water-units">—</span></div>
+          <div class="bill-line" style="margin-top:4px">
+            <span class="lbl" id="r-water-calc-lbl">— หน่วย × — ฿</span>
+            <span class="amt highlight" id="r-water-total">—</span>
+          </div>
+        </div>
+        <div class="bill-section">
+          <div class="bill-section-title"><span class="dot dot-green"></span> ค่าไฟ</div>
+          <div class="bill-line sub-row"><span class="lbl">มิเตอร์เดิม</span><span class="amt" id="r-prev">—</span></div>
+          <div class="bill-line sub-row"><span class="lbl">มิเตอร์ใหม่</span><span class="amt" id="r-curr">—</span></div>
+          <div class="bill-line sub-row"><span class="lbl">จำนวนหน่วย</span><span class="amt" id="r-units">—</span></div>
+          <div class="bill-line" style="margin-top:4px">
+            <span class="lbl" id="r-elec-calc-lbl">— หน่วย × — ฿</span>
+            <span class="amt highlight" id="r-elec-total">—</span>
+          </div>
+        </div>
+        <div class="bill-total-section">
+          <div class="bill-total-row"><span>ค่าเช่าห้อง</span><span class="mono" id="sum-rent">—</span></div>
+          <div class="bill-total-row"><span>ค่าน้ำ</span><span class="mono" id="sum-water">—</span></div>
+          <div class="bill-total-row"><span>ค่าไฟ</span><span class="mono" id="sum-elec">—</span></div>
+          <div class="bill-grand-total">
+            <div class="bill-grand-label">ยอดรวมทั้งหมด</div>
+            <div class="bill-grand-amount" id="r-total">—</div>
+          </div>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary" style="flex:1" onclick="saveBill()">✓ ยืนยันและบันทึก</button>
+        <button class="btn" onclick="resetForm()">ล้าง</button>
+      </div>
+      <div class="card" id="history-card" style="display:none;margin-top:1rem">
+        <div class="card-head"><span class="card-title">ประวัติห้องที่เลือก</span></div>
+        <div class="card-body" style="padding:0">
+          <table>
+            <thead><tr><th>เดือน</th><th>ค่าเช่า</th><th>ค่าน้ำ</th><th>ค่าไฟ</th><th>รวม</th></tr></thead>
+            <tbody id="history-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== ROOMS ===== -->
+<div id="page-rooms" class="page">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.5rem">
+    <div>
+      <h1 style="font-size:18px;font-weight:500">รายการห้องพัก</h1>
+      <p style="font-size:12px;color:var(--muted);margin-top:2px">ลากเพื่อเรียงลำดับห้อง • ข้อมูลอัปเดต real-time</p>
+    </div>
+    <button class="btn btn-primary btn-sm" onclick="showPage('settings', document.querySelectorAll('nav a')[3])">+ เพิ่มห้อง</button>
+  </div>
+  <div class="card">
+    <div id="rooms-sortable"></div>
+  </div>
+</div>
+
+<!-- ===== SETTINGS ===== -->
+<div id="page-settings" class="page">
+  <div class="settings-grid">
+    <div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">อัตราค่าสาธารณูปโภค</span></div>
+        <div class="card-body">
+          <div class="form-row">
+            <div class="form-group"><label>ค่าไฟ (฿/หน่วย)</label><input type="number" id="s-elec-rate" value="7" step="0.5"></div>
+            <div class="form-group"><label>ค่าน้ำ (฿/หน่วย)</label><input type="number" id="s-water-rate" value="18" step="0.5"></div>
+          </div>
+          <button class="btn btn-primary" onclick="saveSettings()">บันทึกการตั้งค่า</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">จัดการข้อมูล</span></div>
+        <div class="card-body">
+          <div class="form-group" style="margin-bottom:12px">
+            <label>เดือนปัจจุบัน</label>
+            <input type="text" id="current-month-input" placeholder="เช่น มิ.ย. 68">
+          </div>
+          <button class="btn btn-primary" onclick="saveMonth()" style="margin-bottom:12px">บันทึกเดือน</button>
+          <div class="divider"></div>
+          <button class="btn btn-danger" onclick="resetMonth()" style="margin-top:8px;width:100%">🔄 เริ่มเดือนใหม่ (ล้างบิลทั้งหมด)</button>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">เพิ่มห้องใหม่</span></div>
+        <div class="card-body">
+          <div class="form-group" style="margin-bottom:12px"><label>หมายเลขห้อง</label><input type="text" id="new-room-id" placeholder="เช่น 201"></div>
+          <div class="form-group" style="margin-bottom:12px"><label>ชื่อผู้เช่า</label><input type="text" id="new-tenant" placeholder="ชื่อผู้เช่า"></div>
+          <div class="form-row">
+            <div class="form-group"><label>ค่าเช่า/เดือน (฿)</label><input type="number" id="new-rent" value="3000"></div>
+            <div class="form-group"><label>มิเตอร์ไฟเริ่มต้น</label><input type="number" id="new-elec-meter" value="0"></div>
+          </div>
+          <div class="form-group" style="margin-bottom:12px"><label>มิเตอร์น้ำเริ่มต้น</label><input type="number" id="new-water-meter" value="0"></div>
+          <button class="btn btn-primary" onclick="addRoom()">เพิ่มห้อง</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><span class="card-title">สถานะ Real-time</span></div>
+        <div class="card-body">
+          <div style="font-size:13px;color:var(--muted);line-height:1.8">
+            <div>🔥 ใช้ Firebase Realtime Database</div>
+            <div>👥 รองรับหลายคนใช้งานพร้อมกัน</div>
+            <div>⚡ อัปเดตทันทีไม่ต้อง refresh</div>
+            <div>💾 ข้อมูลเก็บบน cloud ปลอดภัย</div>
+          </div>
+          <div id="rtdb-url-display" style="font-size:11px;font-family:var(--mono);color:var(--muted);margin-top:10px;word-break:break-all;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Edit Bill Modal -->
+<div class="modal-overlay" id="edit-modal">
+  <div class="modal">
+    <div class="modal-head"><h3 id="edit-modal-title">แก้ไขบิลห้อง —</h3><button class="modal-close" onclick="closeEditModal()">×</button></div>
+    <div class="modal-body">
+      <input type="hidden" id="edit-room-id">
+      <div class="section-label"><span class="dot dot-orange"></span> ค่าเช่าห้อง</div>
+      <div class="form-group" style="margin-bottom:14px"><label>ค่าเช่า (฿)</label><input type="number" id="edit-rent" oninput="recalcEdit()"></div>
+      <div class="section-label"><span class="dot dot-blue"></span> ค่าน้ำ</div>
+      <div class="form-row" style="margin-bottom:14px">
+        <div class="form-group"><label>มิเตอร์น้ำเดิม</label><input type="number" id="edit-water-prev" oninput="recalcEdit()"></div>
+        <div class="form-group"><label>มิเตอร์น้ำใหม่</label><input type="number" id="edit-water-curr" oninput="recalcEdit()"></div>
+      </div>
+      <div class="section-label"><span class="dot dot-green"></span> ค่าไฟ</div>
+      <div class="form-row" style="margin-bottom:14px">
+        <div class="form-group"><label>มิเตอร์ไฟเดิม</label><input type="number" id="edit-elec-prev" oninput="recalcEdit()"></div>
+        <div class="form-group"><label>มิเตอร์ไฟใหม่</label><input type="number" id="edit-elec-curr" oninput="recalcEdit()"></div>
+      </div>
+      <div style="background:var(--bg);border-radius:8px;padding:12px 16px">
+        <div style="display:flex;justify-content:space-between;font-size:13px;color:var(--muted);padding:2px 0"><span>ค่าน้ำ</span><span class="mono" id="edit-water-sum">—</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:13px;color:var(--muted);padding:2px 0"><span>ค่าไฟ</span><span class="mono" id="edit-elec-sum">—</span></div>
+        <div style="display:flex;justify-content:space-between;font-size:15px;font-weight:600;padding:8px 0 0;border-top:1px solid var(--border);margin-top:8px"><span>รวมทั้งหมด</span><span class="mono" style="color:var(--accent)" id="edit-total-sum">—</span></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeEditModal()">ยกเลิก</button>
+        <button class="btn btn-primary" onclick="saveEditBill()">บันทึก</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Edit Room Modal -->
+<div class="modal-overlay" id="edit-room-modal">
+  <div class="modal">
+    <div class="modal-head"><h3 id="edit-room-modal-title">แก้ไขห้อง —</h3><button class="modal-close" onclick="closeEditRoomModal()">×</button></div>
+    <div class="modal-body">
+      <input type="hidden" id="eroom-id">
+      <div class="form-group" style="margin-bottom:12px"><label>หมายเลขห้อง</label><input type="text" id="eroom-num" readonly></div>
+      <div class="form-group" style="margin-bottom:12px"><label>ชื่อผู้เช่า</label><input type="text" id="eroom-tenant"></div>
+      <div class="form-row" style="margin-bottom:12px">
+        <div class="form-group"><label>ค่าเช่า/เดือน (฿)</label><input type="number" id="eroom-rent"></div>
+        <div class="form-group"><label>มิเตอร์ไฟปัจจุบัน</label><input type="number" id="eroom-elec"></div>
+      </div>
+      <div class="form-group" style="margin-bottom:12px"><label>มิเตอร์น้ำปัจจุบัน</label><input type="number" id="eroom-water"></div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeEditRoomModal()">ยกเลิก</button>
+        <button class="btn btn-primary" onclick="saveEditRoom()">บันทึก</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ===== GLOBAL STATE =====
+window._state = {
+  elecRate: 7,
+  waterRate: 18,
+  currentMonth: 'พ.ค. 68',
+  rooms: [],
+  bills: {}
+};
+window._currentPage = 'dashboard';
+let selectedRoom = null;
+let dragSrcIdx = null;
+
+// ===== ONLINE INDICATOR =====
+function updateOnlineIndicator(online) {
+  const dot = document.getElementById('online-dot');
+  const txt = document.getElementById('online-text');
+  const banner = document.getElementById('setup-banner');
+  if (online) {
+    dot.className = 'online-dot';
+    txt.textContent = 'Real-time';
+    banner.style.display = 'none';
+  } else {
+    dot.className = 'online-dot offline';
+    txt.textContent = 'Local mode';
+    banner.style.display = 'flex';
+  }
+}
+window.updateOnlineIndicator = updateOnlineIndicator;
+
+function showSaving(id) {
+  const el = document.getElementById(id);
+  if (el) { el.classList.add('show'); setTimeout(() => el.classList.remove('show'), 1500); }
+}
+
+// ===== NAV =====
+function showPage(id, el) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+  document.getElementById('page-' + id).classList.add('active');
+  if (el) el.classList.add('active');
+  window._currentPage = id;
+  if (id === 'dashboard') renderDashboard();
+  if (id === 'meter') renderMeterPage();
+  if (id === 'rooms') renderRooms();
+  if (id === 'settings') loadSettings();
+}
+
+// ===== DASHBOARD =====
+function renderDashboard() {
+  const { rooms, bills } = window._state;
+  const readCount = rooms.filter(r => bills[r.id]).length;
+  const pendingRooms = rooms.filter(r => bills[r.id] && !bills[r.id].paid);
+  let revenue = 0;
+  rooms.forEach(r => { if (bills[r.id]) revenue += bills[r.id].total; });
+
+  document.getElementById('s-total').textContent = rooms.length;
+  document.getElementById('s-occupied').textContent = rooms.length + ' ห้องเข้าพัก';
+  document.getElementById('s-pending').textContent = pendingRooms.length;
+  document.getElementById('s-read').textContent = readCount;
+  document.getElementById('s-readof').textContent = 'จาก ' + rooms.length + ' ห้อง';
+  document.getElementById('s-revenue').textContent = revenue.toLocaleString();
+  document.getElementById('dash-month').textContent = window._state.currentMonth;
+
+  const tbody = document.getElementById('dash-table');
+  tbody.innerHTML = rooms.map(r => {
+    const b = bills[r.id];
+    if (!b) return `<tr>
+      <td class="mono"><strong>${r.id}</strong></td>
+      <td>${r.tenant || ''}</td>
+      <td class="mono">${(r.rent||0).toLocaleString()}</td>
+      <td>—</td><td>—</td><td>—</td>
+      <td><span class="badge badge-gray">ยังไม่บันทึก</span></td>
+      <td><button class="btn btn-sm" onclick="goToMeterRoom('${r.id}')">บันทึกบิล</button></td>
+    </tr>`;
+    return `<tr id="dash-row-${r.id}">
+      <td class="mono"><strong>${r.id}</strong></td>
+      <td>${r.tenant || ''}</td>
+      <td class="mono">${(b.rent||0).toLocaleString()}</td>
+      <td class="mono">${(b.waterTotal||0).toLocaleString()} <span style="color:var(--muted);font-size:11px">(${b.waterUnits||0}u)</span></td>
+      <td class="mono">${(b.elecTotal||0).toLocaleString()} <span style="color:var(--muted);font-size:11px">(${b.elecUnits||0}u)</span></td>
+      <td class="mono" style="font-weight:600">${(b.total||0).toLocaleString()}</td>
+      <td>
+        <span class="badge ${b.paid ? 'badge-ok' : 'badge-warn'}">${b.paid ? 'ชำระแล้ว' : 'ค้างชำระ'}</span>
+        ${!b.paid ? `<button class="btn btn-sm" style="margin-left:6px" onclick="markPaid('${r.id}')">✓ ชำระ</button>` : ''}
+      </td>
+      <td><button class="edit-btn-dash" onclick="openEditModal('${r.id}')">✏️ แก้ไข</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function goToMeterRoom(id) {
+  selectedRoom = id;
+  showPage('meter', document.querySelectorAll('nav a')[1]);
+}
+
+async function markPaid(roomId) {
+  showSaving('saving-dash');
+  await window._db.updateBill(roomId, { paid: true });
+  // Local fallback
+  if (window._state.bills[roomId]) window._state.bills[roomId].paid = true;
+  renderDashboard();
+  toast('บันทึกการชำระห้อง ' + roomId);
+}
+
+// ===== EDIT BILL =====
+function openEditModal(roomId) {
+  const bill = window._state.bills[roomId];
+  if (!bill) return;
+  document.getElementById('edit-room-id').value = roomId;
+  document.getElementById('edit-modal-title').textContent = 'แก้ไขบิลห้อง ' + roomId;
+  document.getElementById('edit-rent').value = bill.rent || 0;
+  document.getElementById('edit-water-prev').value = bill.waterPrev || 0;
+  document.getElementById('edit-water-curr').value = bill.waterCurr || 0;
+  document.getElementById('edit-elec-prev').value = bill.elecPrev || 0;
+  document.getElementById('edit-elec-curr').value = bill.elecCurr || 0;
+  recalcEdit();
+  document.getElementById('edit-modal').classList.add('open');
+}
+function closeEditModal() { document.getElementById('edit-modal').classList.remove('open'); }
+
+function recalcEdit() {
+  const rent = parseFloat(document.getElementById('edit-rent').value) || 0;
+  const wp = parseFloat(document.getElementById('edit-water-prev').value) || 0;
+  const wc = parseFloat(document.getElementById('edit-water-curr').value) || 0;
+  const ep = parseFloat(document.getElementById('edit-elec-prev').value) || 0;
+  const ec = parseFloat(document.getElementById('edit-elec-curr').value) || 0;
+  const wu = Math.max(0, wc - wp), eu = Math.max(0, ec - ep);
+  const wt = wu * window._state.waterRate, et = eu * window._state.elecRate;
+  document.getElementById('edit-water-sum').textContent = wt.toLocaleString() + ' ฿';
+  document.getElementById('edit-elec-sum').textContent = et.toLocaleString() + ' ฿';
+  document.getElementById('edit-total-sum').textContent = (rent + wt + et).toLocaleString() + ' ฿';
+}
+
+async function saveEditBill() {
+  const roomId = document.getElementById('edit-room-id').value;
+  const rent = parseFloat(document.getElementById('edit-rent').value) || 0;
+  const wp = parseFloat(document.getElementById('edit-water-prev').value) || 0;
+  const wc = parseFloat(document.getElementById('edit-water-curr').value) || 0;
+  const ep = parseFloat(document.getElementById('edit-elec-prev').value) || 0;
+  const ec = parseFloat(document.getElementById('edit-elec-curr').value) || 0;
+  const wu = Math.max(0, wc - wp), eu = Math.max(0, ec - ep);
+  const wt = wu * window._state.waterRate, et = eu * window._state.elecRate;
+  const total = rent + wt + et;
+  const oldBill = window._state.bills[roomId] || {};
+  const bill = { ...oldBill, rent, waterPrev:wp, waterCurr:wc, waterUnits:wu, waterTotal:wt, elecPrev:ep, elecCurr:ec, elecUnits:eu, elecTotal:et, total, month: window._state.currentMonth };
+  await window._db.setBill(roomId, bill);
+  const room = window._state.rooms.find(r => r.id === roomId);
+  if (room) { if (ec>0) room.lastElec=ec; if (wc>0) room.lastWater=wc; room.rent=rent; await window._db.setRoom(room); }
+  closeEditModal();
+  toast('แก้ไขบิลห้อง ' + roomId + ' เรียบร้อย');
+}
+
+// ===== METER PAGE =====
+function renderMeterPage() {
+  document.getElementById('water-rate-label').textContent = window._state.waterRate;
+  document.getElementById('elec-rate-label').textContent = window._state.elecRate;
+  const sel = document.getElementById('room-selector');
+  sel.innerHTML = window._state.rooms.map(r => {
+    const done = !!window._state.bills[r.id];
+    return `<button class="room-btn ${selectedRoom === r.id ? 'active' : ''}" onclick="selectRoom('${r.id}')">${r.id}${done ? ' ✓' : ''}</button>`;
+  }).join('');
+  if (!selectedRoom && window._state.rooms.length) selectRoom(window._state.rooms[0].id);
+  else if (selectedRoom && window._state.rooms.find(r => r.id === selectedRoom)) selectRoom(selectedRoom);
+}
+
+function selectRoom(id) {
+  selectedRoom = id;
+  document.querySelectorAll('.room-btn').forEach(b => {
+    b.classList.toggle('active', b.textContent.startsWith(id));
+  });
+  const room = window._state.rooms.find(r => r.id === id);
+  if (!room) return;
+
+  document.getElementById('prev-val').value = room.lastElec || 0;
+  document.getElementById('water-prev').value = room.lastWater || 0;
+  document.getElementById('curr-val').value = '';
+  document.getElementById('water-curr').value = '';
+  document.getElementById('rent-val').value = room.rent || 0;
+  document.getElementById('water-units-display').value = '';
+  document.getElementById('elec-units-display').value = '';
+  document.getElementById('r-room-num').textContent = 'ห้อง ' + id;
+  document.getElementById('r-tenant-name').textContent = room.tenant || '';
+  document.getElementById('r-month').textContent = window._state.currentMonth;
+  document.getElementById('r-rent').textContent = (room.rent||0).toLocaleString() + ' ฿';
+  document.getElementById('sum-rent').textContent = (room.rent||0).toLocaleString() + ' ฿';
+  ['r-water-prev','r-water-curr','r-water-units','r-water-total','r-prev','r-curr','r-units','r-elec-total','r-total','sum-water','sum-elec'].forEach(eid => document.getElementById(eid).textContent = '—');
+  document.getElementById('r-water-calc-lbl').textContent = '— หน่วย × ' + window._state.waterRate + ' ฿';
+  document.getElementById('r-elec-calc-lbl').textContent = '— หน่วย × ' + window._state.elecRate + ' ฿';
+
+  const hist = room.history || [];
+  if (hist.length) {
+    document.getElementById('history-card').style.display = '';
+    const rows = Array.isArray(hist) ? hist : Object.values(hist);
+    document.getElementById('history-table').innerHTML = rows.slice().reverse().slice(0, 5).map(h =>
+      `<tr><td>${h.month}</td><td class="mono">${(h.rent||0).toLocaleString()}</td><td class="mono">${(h.waterTotal||0).toLocaleString()}</td><td class="mono">${(h.elecTotal||0).toLocaleString()}</td><td class="mono" style="font-weight:600">${(h.total||0).toLocaleString()} ฿</td></tr>`
+    ).join('');
+  } else { document.getElementById('history-card').style.display = 'none'; }
+}
+
+function recalc() {
+  const rent = parseFloat(document.getElementById('rent-val').value) || 0;
+  const wp = parseFloat(document.getElementById('water-prev').value) || 0;
+  const wc = parseFloat(document.getElementById('water-curr').value) || 0;
+  const ep = parseFloat(document.getElementById('prev-val').value) || 0;
+  const ec = parseFloat(document.getElementById('curr-val').value) || 0;
+  const wu = wc > wp ? wc - wp : 0;
+  const eu = ec > ep ? ec - ep : 0;
+  const wt = wu * window._state.waterRate;
+  const et = eu * window._state.elecRate;
+  const grand = rent + wt + et;
+
+  document.getElementById('water-units-display').value = wu > 0 ? wu : '';
+  document.getElementById('elec-units-display').value = eu > 0 ? eu : '';
+  document.getElementById('r-water-prev').textContent = wp.toLocaleString();
+  document.getElementById('r-water-curr').textContent = wc ? wc.toLocaleString() : '—';
+  document.getElementById('r-water-units').textContent = wu > 0 ? wu + ' หน่วย' : '—';
+  document.getElementById('r-water-calc-lbl').textContent = (wu||'—') + ' หน่วย × ' + window._state.waterRate + ' ฿';
+  document.getElementById('r-water-total').textContent = wu > 0 ? wt.toLocaleString() + ' ฿' : '—';
+  document.getElementById('r-prev').textContent = ep.toLocaleString();
+  document.getElementById('r-curr').textContent = ec ? ec.toLocaleString() : '—';
+  document.getElementById('r-units').textContent = eu > 0 ? eu + ' หน่วย' : '—';
+  document.getElementById('r-elec-calc-lbl').textContent = (eu||'—') + ' หน่วย × ' + window._state.elecRate + ' ฿';
+  document.getElementById('r-elec-total').textContent = eu > 0 ? et.toLocaleString() + ' ฿' : '—';
+  document.getElementById('r-rent').textContent = rent > 0 ? rent.toLocaleString() + ' ฿' : '—';
+  document.getElementById('sum-rent').textContent = rent > 0 ? rent.toLocaleString() + ' ฿' : '—';
+  document.getElementById('sum-water').textContent = wu > 0 ? wt.toLocaleString() + ' ฿' : '—';
+  document.getElementById('sum-elec').textContent = eu > 0 ? et.toLocaleString() + ' ฿' : '—';
+  document.getElementById('r-total').textContent = grand > 0 ? grand.toLocaleString() + ' ฿' : '—';
+}
+
+async function saveBill() {
+  if (!selectedRoom) { toast('กรุณาเลือกห้อง'); return; }
+  const rent = parseFloat(document.getElementById('rent-val').value) || 0;
+  const wp = parseFloat(document.getElementById('water-prev').value) || 0;
+  const wc = parseFloat(document.getElementById('water-curr').value) || 0;
+  const ep = parseFloat(document.getElementById('prev-val').value) || 0;
+  const ec = parseFloat(document.getElementById('curr-val').value) || 0;
+  if (rent <= 0 && wc <= wp && ec <= ep) { toast('กรุณากรอกข้อมูลค่าใช้จ่ายก่อน'); return; }
+  const wu = wc > wp ? wc - wp : 0;
+  const eu = ec > ep ? ec - ep : 0;
+  const wt = wu * window._state.waterRate, et = eu * window._state.elecRate;
+  const total = rent + wt + et;
+  const bill = { rent, waterPrev:wp, waterCurr:wc, waterUnits:wu, waterTotal:wt, elecPrev:ep, elecCurr:ec, elecUnits:eu, elecTotal:et, total, paid:false, month: window._state.currentMonth };
+
+  // Update room
+  const room = window._state.rooms.find(r => r.id === selectedRoom);
+  if (ec > ep) room.lastElec = ec;
+  if (wc > wp) room.lastWater = wc;
+  room.rent = rent;
+  const histEntry = { month: window._state.currentMonth, rent, waterTotal:wt, elecTotal:et, total };
+  if (!room.history) room.history = [];
+  if (Array.isArray(room.history)) room.history.push(histEntry);
+
+  // Save to Firebase
+  await Promise.all([
+    window._db.setBill(selectedRoom, bill),
+    window._db.setRoom(room)
+  ]);
+  toast('บันทึกห้อง ' + selectedRoom + ' — รวม ' + total.toLocaleString() + ' ฿');
+}
+
+function resetForm() {
+  if (!selectedRoom) return;
+  document.getElementById('curr-val').value = '';
+  document.getElementById('water-curr').value = '';
+  document.getElementById('water-units-display').value = '';
+  document.getElementById('elec-units-display').value = '';
+  recalc();
+}
+
+// ===== ROOMS (DRAG TO REORDER) =====
+function renderRooms() {
+  const container = document.getElementById('rooms-sortable');
+  container.innerHTML = '';
+
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex;align-items:center;background:#fafaf8;border-bottom:1px solid var(--border)';
+  header.innerHTML = `<div style="width:46px"></div><table style="flex:1"><thead><tr>
+    <th style="width:70px">ห้อง</th><th style="width:160px">ผู้เช่า</th>
+    <th style="width:120px">ค่าเช่า/เดือน</th><th style="width:110px">มิเตอร์ไฟ</th>
+    <th style="width:110px">มิเตอร์น้ำ</th><th style="width:120px">ค้างชำระ</th><th></th>
+  </tr></thead></table>`;
+  container.appendChild(header);
+
+  window._state.rooms.forEach((r, idx) => {
+    const bill = window._state.bills[r.id];
+    const debt = bill && !bill.paid ? bill.total : 0;
+    const wrapper = document.createElement('div');
+    wrapper.className = 'room-row';
+    wrapper.draggable = true;
+    wrapper.dataset.idx = idx;
+    wrapper.innerHTML = `
+      <div class="drag-handle" title="ลากเพื่อเรียงลำดับ">⠿</div>
+      <table style="flex:1"><tbody><tr>
+        <td class="mono" style="width:70px"><strong>${r.id}</strong></td>
+        <td style="width:160px">${r.tenant || '<span style="color:var(--muted)">—</span>'}</td>
+        <td class="mono" style="width:120px">${(r.rent||0).toLocaleString()} ฿</td>
+        <td class="mono" style="width:110px">${(r.lastElec||0).toLocaleString()}</td>
+        <td class="mono" style="width:110px">${(r.lastWater||0).toLocaleString()}</td>
+        <td style="width:120px">${debt ? `<span class="badge badge-warn">${debt.toLocaleString()} ฿</span>` : '<span class="badge badge-ok">ไม่มี</span>'}</td>
+        <td style="text-align:right;padding-right:16px">
+          <button class="btn btn-sm" onclick="openEditRoomModal('${r.id}')" style="margin-right:4px">แก้ไข</button>
+          <button class="btn btn-sm btn-danger" onclick="removeRoom('${r.id}')">ลบ</button>
+        </td>
+      </tr></tbody></table>`;
+
+    wrapper.addEventListener('dragstart', e => { dragSrcIdx = idx; wrapper.classList.add('dragging'); e.dataTransfer.effectAllowed = 'move'; });
+    wrapper.addEventListener('dragend', () => { wrapper.classList.remove('dragging'); container.querySelectorAll('.room-row').forEach(el => el.classList.remove('drag-over')); });
+    wrapper.addEventListener('dragover', e => { e.preventDefault(); container.querySelectorAll('.room-row').forEach(el => el.classList.remove('drag-over')); wrapper.classList.add('drag-over'); });
+    wrapper.addEventListener('drop', async e => {
+      e.preventDefault();
+      const targetIdx = parseInt(wrapper.dataset.idx);
+      if (dragSrcIdx === null || dragSrcIdx === targetIdx) return;
+      const rooms = window._state.rooms;
+      const moved = rooms.splice(dragSrcIdx, 1)[0];
+      rooms.splice(targetIdx, 0, moved);
+      await window._db.reorderRooms(rooms);
+      renderRooms();
+      toast('เรียงลำดับห้องเรียบร้อย');
+    });
+    container.appendChild(wrapper);
+  });
+}
+
+// ===== EDIT ROOM =====
+function openEditRoomModal(id) {
+  const room = window._state.rooms.find(r => r.id === id);
+  if (!room) return;
+  document.getElementById('eroom-id').value = id;
+  document.getElementById('edit-room-modal-title').textContent = 'แก้ไขห้อง ' + id;
+  document.getElementById('eroom-num').value = id;
+  document.getElementById('eroom-tenant').value = room.tenant || '';
+  document.getElementById('eroom-rent').value = room.rent || 0;
+  document.getElementById('eroom-elec').value = room.lastElec || 0;
+  document.getElementById('eroom-water').value = room.lastWater || 0;
+  document.getElementById('edit-room-modal').classList.add('open');
+}
+function closeEditRoomModal() { document.getElementById('edit-room-modal').classList.remove('open'); }
+
+async function saveEditRoom() {
+  const id = document.getElementById('eroom-id').value;
+  const room = window._state.rooms.find(r => r.id === id);
+  if (!room) return;
+  room.tenant = document.getElementById('eroom-tenant').value.trim();
+  room.rent = parseFloat(document.getElementById('eroom-rent').value) || room.rent;
+  room.lastElec = parseFloat(document.getElementById('eroom-elec').value) ?? room.lastElec;
+  room.lastWater = parseFloat(document.getElementById('eroom-water').value) ?? room.lastWater;
+  await window._db.setRoom(room);
+  closeEditRoomModal();
+  toast('แก้ไขห้อง ' + id + ' เรียบร้อย');
+}
+
+async function addRoom() {
+  const id = document.getElementById('new-room-id').value.trim();
+  const tenant = document.getElementById('new-tenant').value.trim();
+  const rent = parseInt(document.getElementById('new-rent').value) || 3000;
+  const elec = parseInt(document.getElementById('new-elec-meter').value) || 0;
+  const water = parseInt(document.getElementById('new-water-meter').value) || 0;
+  if (!id) { toast('กรุณากรอกหมายเลขห้อง'); return; }
+  if (window._state.rooms.find(r => r.id === id)) { toast('มีห้องนี้แล้ว'); return; }
+  const newRoom = { id, tenant, rent, lastElec: elec, lastWater: water, history: [], order: window._state.rooms.length };
+  await window._db.setRoom(newRoom);
+  toast('เพิ่มห้อง ' + id + ' เรียบร้อย');
+  document.getElementById('new-room-id').value = '';
+  document.getElementById('new-tenant').value = '';
+  document.getElementById('new-rent').value = '3000';
+  document.getElementById('new-elec-meter').value = '0';
+  document.getElementById('new-water-meter').value = '0';
+}
+
+async function removeRoom(id) {
+  if (!confirm('ลบห้อง ' + id + ' ออกจากระบบ?')) return;
+  await window._db.removeRoom(id);
+  if (selectedRoom === id) selectedRoom = null;
+  toast('ลบห้อง ' + id + ' เรียบร้อย');
+}
+
+// ===== SETTINGS =====
+function loadSettings() {
+  document.getElementById('s-elec-rate').value = window._state.elecRate;
+  document.getElementById('s-water-rate').value = window._state.waterRate;
+  document.getElementById('current-month-input').value = window._state.currentMonth;
+}
+
+async function saveSettings() {
+  const elecRate = parseFloat(document.getElementById('s-elec-rate').value) || 7;
+  const waterRate = parseFloat(document.getElementById('s-water-rate').value) || 18;
+  window._state.elecRate = elecRate;
+  window._state.waterRate = waterRate;
+  await window._db.saveSettings({ elecRate, waterRate });
+  toast('บันทึกการตั้งค่าเรียบร้อย');
+}
+
+async function saveMonth() {
+  const m = document.getElementById('current-month-input').value.trim();
+  if (!m) { toast('กรุณากรอกชื่อเดือน'); return; }
+  await window._db.saveSettings({ currentMonth: m });
+  toast('บันทึกเดือน: ' + m);
+}
+
+async function resetMonth() {
+  const m = document.getElementById('current-month-input').value.trim();
+  if (!m) { toast('กรุณากรอกชื่อเดือนใหม่ก่อน'); return; }
+  if (!confirm('เริ่มเดือนใหม่: ' + m + '\nบิลทั้งหมดของเดือนนี้จะถูกล้าง ยืนยัน?')) return;
+  const { ref: fbRef, remove: fbRemove } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js");
+  if (window._db.isConfigured) {
+    // clear all bills via db
+    const billIds = Object.keys(window._state.bills);
+    for (const id of billIds) await window._db.updateBill(id, null);
+  }
+  window._state.bills = {};
+  await window._db.saveSettings({ currentMonth: m });
+  selectedRoom = null;
+  toast('เริ่มเดือนใหม่: ' + m);
+}
+
+// Close modals on overlay click
+document.getElementById('edit-modal').addEventListener('click', function(e) { if (e.target === this) closeEditModal(); });
+document.getElementById('edit-room-modal').addEventListener('click', function(e) { if (e.target === this) closeEditRoomModal(); });
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2800);
+}
+</script>
+</body>
+</html>
