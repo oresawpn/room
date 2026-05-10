@@ -1,101 +1,41 @@
 <!DOCTYPE html>
 <html lang="en">
   <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Room Metering System</title>
-    <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
-    <style>
-          :root {
-                  --bg: #f5f4f0; --surface: #ffffff; --border: #e2e0d8;
-                  --text: #1a1917; --muted: #7a7870; --accent: #1a3a2a;
-                  --warn: #8a3a00; --success: #1a5c2a; --mono: 'IBM Plex Mono', monospace;
-          }
-          * { box-sizing: border-box; margin: 0; padding: 0; }
-          body { font-family: 'Sarabun', sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
-          header { background: var(--accent); color: #fff; padding: 0 1.5rem; display: flex; align-items: center; justify-content: space-between; height: 50px; }
-          .logo { font-size: 14px; font-weight: 600; }
-          nav a { color: rgba(255,255,255,0.7); text-decoration: none; font-size: 13px; padding: 0 10px; cursor: pointer; }
-          nav a.active { color: #fff; border-bottom: 2px solid #7ec8a0; }
-          .page { display: none; max-width: 1000px; margin: 0 auto; padding: 1.5rem; }
-          .page.active { display: block; }
-          .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 1.5rem; }
-          .stat { background: var(--surface); border: 1px solid var(--border); padding: 15px; border-radius: 8px; }
-          .stat-label { font-size: 10px; color: var(--muted); text-transform: uppercase; }
-          .stat-val { font-size: 24px; font-weight: 600; font-family: var(--mono); }
-          .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
-          table { width: 100%; border-collapse: collapse; }
-          th { text-align: left; padding: 10px; background: #fafafa; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--muted); }
-          td { padding: 10px; border-bottom: 1px solid var(--border); }
-          .btn { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); cursor: pointer; }
-          .btn-primary { background: var(--accent); color: #fff; border: none; }
-        </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Room Metering System</title>
+  <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+      :root {
+            --bg: #f5f4f0;
+            --surface: #ffffff;
+            --border: #e2e0d8;
+            --text: #1a1917;
+            --muted: #7a7870;
+            --accent: #1a3a2a;
+            --warn: #8a3a00;
+            --success: #1a5c2a;
+            --mono: 'IBM Plex Mono', monospace;
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: 'Sarabun', sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+      header { background: var(--accent); color: #fff; padding: 0 1.5rem; display: flex; align-items: center; justify-content: space-between; height: 50px; }
+      .logo { font-size: 14px; font-weight: 600; }
+    </style>
   </head>
   <body>
-      <header>
-            <div class="logo">Room Metering System</div>div>
-            <nav>
-                    <a class="active" onclick="showPage('dashboard')">Dashboard</a>a>
-                    <a onclick="showPage('meter')">Record Bill</a>a>
-                    <a onclick="showPage('rooms')">Rooms</a>a>
-                    <a onclick="showPage('settings')">Settings</a>a>
-            </nav>
-      </header>
-      <div id="page-dashboard" class="page active">
-            <div class="stats">
-                    <div class="stat"><div class="stat-label">Total Rooms</div>div><div class="stat-val" id="s-total">0</div>div></div>div>
-                    <div class="stat"><div class="stat-label">Occupied</div>div><div class="stat-val" id="s-occupied">0</div>div></div>div>
-                    <div class="stat"><div class="stat-label">Pending</div>div><div class="stat-val" id="s-pending">0</div>div></div>div>
-                    <div class="stat"><div class="stat-label">Revenue</div>div><div class="stat-val" id="s-revenue">0</div>div></div>div>
-            </div>div>
-            <div class="card">
-                    <table>
-                              <thead><tr><th>Room</th><th>Tenant</th><th>Rent</th><th>Water</th><th>Elec</th><th>Total</th><th>Status</th></tr></thead>
-                            <tbody id="dash-table"></tbody>tbody>
-                    </table>
-            </div>div>
-      </div>div>
-    <script>
-          function showPage(id) {
-                  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-                  document.getElementById('page-' + id).classList.add('active');
-          }
-    </script>
-      <script src="https://cdn.jsdelivr.net/npm/gun/gun.js"></script>
-      <script>
-            const gun = Gun(['https://gun-manhattan.herokuapp.com/gun']);
-            const db = gun.get('meterapp-v1');
-            const state = { rooms: [], bills: {}, settings: { elecRate: 7, waterRate: 18 } };
-
-            db.get('rooms').map().on(data => {
-                    if (!data) return;
-                    const idx = state.rooms.findIndex(r => r.id === data.id);
-                    if (idx >= 0) state.rooms[idx] = data; else state.rooms.push(data);
-                    renderDashboard();
-            });
-
-            function renderDashboard() {
-                    const tbody = document.getElementById('dash-table');
-                    tbody.innerHTML = state.rooms.map(r => `
-                            <tr>
-                                      <td>${r.name}</td>
-                                                <td>${r.tenant || '-'}</td>
-                                                          <td>${r.rent || 0}</td>
-                                                                    <td>-</td><td>-</td><td>-</td>
-                                                                              <td><span class="badge">Pending</span></td>
-                                                                                      </tr>
-                                                                                            `).join('');
-                    document.getElementById('s-total').textContent = state.rooms.length;
-            }
-      </script>
+    <header>
+        <div class="logo">Room Metering System</div>div>
+    </header>
+    <div id="page-dashboard" class="page active">
+        <div class="stats">
+              <div class="stat"><div class="stat-label">Total Rooms</div>div><div class="stat-val" id="s-total">0</div>div></div>div>
+        </div>div>
+    </div>div>
   </body>
 </html>html>
 
-      </script>
-    </script></th></th></tr></thead>
-                    </table>
-            </nav>
-      </header>
+    </header>
   </body>
-    </style></title>
+  </style></title>
   </head>
